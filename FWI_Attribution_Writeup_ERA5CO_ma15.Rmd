@@ -1,0 +1,1142 @@
+---
+title: "FWI Attribution Writeup"
+subtitle: "ERA5 Harbison Meadow"
+author: "Troy Wixson"
+date: "7/15/2022"
+output: pdf_document
+header-includes:
+- \usepackage{float}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, fig.pos = "H")
+library(tidyverse)
+library(evd)
+library(knitr)
+
+setwd("C:/Users/troyw/Documents/CSU/MSPHD/Research/Time_Series_Extension_Spring2022/")
+
+
+source("innovations_functions.R")
+```
+  
+# Motivation  
+
+The Colorado division of Fire Prevention and Control reports that, in recorded Colorado history, "20 of 20 largest wildfires have occurred in the last 20 years". Furthermore they show that the three largest fires in Colorado occurred in 2020 and burned more than 500,000 acres. Are these extreme fire events more likely to occur in Colorado under current climate than the climate of 50 years ago? To provide a useful answer that question we perform an extreme event attribution study for fire weather in Colorado. In particular we consider the climate just north of Grand Lake, CO which was burned in the East Troublesome fire in 2020 (the second largest fire in Colorado history).
+
+# Data 
+
+## ERA5
+
+We consider ERA5 reanalysis data downloaded from the Copernicus Climate Change Service on the grid cell including latitude 40.25 degrees and longitude -105.75 degrees.  This area was chosen due to its proximity to one of the largest fires in 2020 and the location of a weather station so that we could replicate our results with a second data set. We downloaded hourly ten meter wind speed in the U and V directions, two meter dew point, two meter temperature, and total precipitation for the months of June through October for all available years (1959 - 2021). These months were chosen as they encompass Colorado's fire season and they match the season chosen in a previous study (Mhatre and Cooley, in progress). These five variables were used to compute the daily Fire Weather Index (FWI).  
+  
+The Canadian fire weather index (FWI) is a function of the time series' of daily screen level temperature, screen level relative humidity, ten-meter wind speed, and 24-hour accumulated precipitation. To compute the FWI one must first use the four weather variables to compute three fuel moisture codes and two fire behavior indices. These five sub-indices are combined to compute a single value which indicates how likely a fire is to start and how quickly it could spread each day. We note that a benefit of using FWI is that the only signal that it contains is a climate signal and thus any difference that we notice must be due to some change in the marginal climate distribution rather than forest management or other potential confounders.
+
+## RAWS  
+
+We consider RAWS data (... to come ...)  
+  
+# Big Picture  
+  
+To determine whether a fire season like 2020's is more or less likely under current and past climate we use transformed linear models for time series extremes. These time series models were chosen because we are interested in the dependence in the upper tail of the distribution. We are not interested in modeling the bulk of the distribution (classical time series) as the bulk does not adequately inform about these extreme events. Many other extreme value time series models either model dependence in both tails (unhelpful in this case) or model the upper tail with strict modeling assumptions. These models restrict attention to the upper tail through the use of transformed linear operations (Cooley and Thibaud) and are determined by the tail pairwise dependence function (TPDF) (Mahtre and Cooley, in progress).  
+  
+Before using these models we must transform the marginal distribution for our time series to be non-negative regularly varying with tail index 2 and the time series must exhibit weak tail stationarity. FWI is non-negative but exploratory analysis indicate that the our time series has a bounded tail. Exploratory analysis suggest seasonality in the upper quantiles of the FWI time series. This seasonality must be removed.  
+  
+To satisfy the requirements of the models we estimate the seasonality and transform the marginal distribution to be uniform with the probability integral transform. Once the time series is marginally uniform we transform the time series to be marginally Frechet with scale 1 and tail index $\alpha = 2$.   
+  
+We then estimate the TPDF and run Mhatre and Cooley's analogue to the innovations algorithm which provides as many moving average (MA) parameters as needed to adequately model the tail dependence. These parameter estimates are then used to simulate new seasons. Summary statistics and TPDF plots are used to determine the order of the MA(q).   
+  
+Once we have an adequate model for the tail dependence we simulate 10,000 seasons of FWI time series under both current and past climate. We then compute the probability of seeing as many days above the 0.95 quantile of current climate FWI as we saw in 2020.   
+  
+  
+# Estimation of Seasonality  
+
+```{r "marginal distribution estimation", cache = T, echo = F, warning=FALSE}
+file.name <- "ERA5_data/ERA5_CO_FWI_07_15.csv"
+
+# The following are the values that we must choose for forward and back transformation
+past <- 1959:1978
+present <- 2002:2021
+gpd_quant <- 0.975 # quantile for gpd in original marginal estimation
+window_size <- 14 # number of days on each side of the moving window for marginal estimation 
+maxlag <- 30 # How many lags to estimate tpdf 
+r0_quant <- 0.975 # high radial quantile for tpdf estimation 
+set.seed(92432) # noise sequence seed
+seq_length <- 50000 # length of noise sequence to generate MA(q)'s for fitting
+max_theta <- maxlag # maximum reasonable order of for MA(q)
+chosen_order <- 15 # what order MA(q) do we want to use 
+
+
+#load the data 
+data.temp <- read_csv(file.name, show_col_types = FALSE)
+
+#restrict to months we are considering
+data.temp <- filter(data.temp, MON %in% 6:10)
+
+#restrict to years we are considering 
+data_early <- filter(data.temp, YR %in% past)
+data_late <- filter(data.temp, YR %in% present)
+
+
+#Get rid of "bad" years (bad if it has fewer than 50 days or fewer than 5 observations above some value)
+keep <- c()
+
+#past climate
+ #0.7 quantile of past FWI used to determine if a year has enough moderately high observations 
+      # to considered a full year   
+quant_good <- quantile(data_early$FWI, probs = 0.7) 
+for(yr in unique(data_early$YR)){
+  data_temp <- filter(data_early, YR == yr)
+  if((length(data_temp$FWI) > 50) && (sum(data_temp$FWI > quant_good) >= 5)){
+    keep <- c(keep, yr)
+  } 
+}
+
+data_early <- filter(data_early, YR %in% keep)
+
+#current climate
+keep <- c()
+
+for(yr in unique(data_late$YR)){
+  data_temp <- filter(data_late, YR == yr)
+  if((length(data_temp$FWI) > 50) && (sum(data_temp$FWI > quant_good) >= 5)){
+    keep <- c(keep, yr)
+  } 
+}
+
+data_late <- filter(data_late, YR %in% keep)
+
+# Add a variable "days_since" to represent days since June 1
+data_early$days_since <- as.numeric(data_early$DATE - as.Date(paste(data_early$YR, "-05-31", sep = "")))
+data_late$days_since <- as.numeric(data_late$DATE - as.Date(paste(data_late$YR, "-05-31", sep = "")))
+data_late_no2020 <- data_late[-c(which(data_late$YR == 2020)),]
+
+# save quantiles (i.e. sort the (2k+1) day moving window of observations for each day)
+ecdf_early <- matrix(NA, nrow = (2*window_size+1)*20, ncol = 153)
+ecdf_late <- matrix(NA, nrow = (2*window_size+1)*20, ncol = 153)
+ecdf_late_no2020 <- matrix(NA, nrow = (2*window_size+1)*20, ncol = 153)
+
+for(i in 1:153){
+  # consider only days between day i-k and i+k and sort the values on those (2k+1) days
+  temp_data_early <- sort(data_early$FWI[which(data_early$days_since %in% 
+                                      max(1, i-window_size):min(153, i+window_size))])
+  temp_data_late <- sort(data_late$FWI[which(data_late$days_since %in% 
+                                      max(1, i-window_size):min(153, i+window_size))])
+  temp_data_late_no2020 <- sort(data_late_no2020$FWI[which(data_late_no2020$days_since %in% 
+                                      max(1, i-window_size):min(153, i+window_size))])
+  
+  # save the sorted days within the moving window as the ecdf quantiles
+  ecdf_early[1:length(temp_data_early), i] <- temp_data_early
+  ecdf_late[1:length(temp_data_late), i] <- temp_data_late
+  ecdf_late_no2020[1:length(temp_data_late_no2020), i] <- temp_data_late_no2020
+}
+
+
+# save the threshold values
+mu_early <- mu_late <- mu_late_no2020 <- rep(NA, 153)
+
+for (i in 1:153){
+  q_temp_early <- floor(gpd_quant*(1+length(na.omit(ecdf_early[,i]))))
+  mu_early[i] <- ecdf_early[q_temp_early, i]
+  
+  q_temp_late <- floor(gpd_quant*(1+length(na.omit(ecdf_late[,i]))))
+  mu_late[i] <- ecdf_late[q_temp_late, i]
+  
+  q_temp_late_no_2020 <- floor(gpd_quant*(1+length(na.omit(ecdf_late_no2020[,i]))))
+  mu_late_no2020[i] <- ecdf_late_no2020[q_temp_late_no_2020, i]
+}
+
+# Compute and save the amount that observations exceed the threshold. 
+exceedance_early <- exceedance_late <- exceedance_late_no2020 <- c()
+yrs_early <- yrs_late <- yrs_late_no2020 <- c()
+days_early <- days_late <- days_late_no2020 <- c()
+
+for (i in 1:153){
+  indices_temp <- which(data_early$days_since == i) #take all of the ith days
+  temp_data_early <- data_early$FWI[indices_temp] 
+  temp_ex_early <- temp_data_early - mu_early[i] #compute exceedances
+  exceedance_early <- c(exceedance_early, temp_ex_early) #append
+  yrs_early <- c(yrs_early, data_early$YR[indices_temp])
+  days_early <- c(days_early, rep(i, length(indices_temp)))
+  
+  indices_temp <- which(data_late$days_since == i)
+  temp_data_late <- data_late$FWI[indices_temp]
+  temp_ex_late <- temp_data_late - mu_late[i]
+  exceedance_late <- c(exceedance_late, temp_ex_late)
+  yrs_late <- c(yrs_late, data_late$YR[indices_temp])
+  days_late <- c(days_late, rep(i, length(indices_temp)))
+  
+  indices_temp <- which(data_late_no2020$days_since == i)
+  temp_data_late_no2020 <- data_late_no2020$FWI[indices_temp]
+  temp_ex_late_no2020 <- temp_data_late_no2020 - mu_late_no2020[i]
+  exceedance_late_no2020 <- c(exceedance_late_no2020, temp_ex_late_no2020)
+  yrs_late_no2020 <- c(yrs_late_no2020, data_late_no2020$YR[indices_temp])
+  days_late_no2020 <- c(days_late_no2020, rep(i, length(indices_temp)))
+}
+
+# Rearrange exceedances so that they are in the same order as the data
+exceedance_early <- data.frame(exceedance_early, yrs_early, days_early) %>% arrange(yrs_early)
+exceedance_late <- data.frame(exceedance_late, yrs_late, days_late) %>% arrange(yrs_late)
+exceedance_late_no2020 <- data.frame(exceedance_late_no2020, yrs_late_no2020, days_late_no2020) %>% arrange(yrs_late_no2020)
+
+# fit the GPD to the exceedances and save the likelihood value
+single_model_early <- fpot(exceedance_early$exceedance_early, threshold = 0)
+single_model_late <- fpot(exceedance_late$exceedance_late, threshold = 0)
+single_model_late_no2020 <- fpot(exceedance_late_no2020$exceedance_late_no2020, threshold = 0)
+
+#save parameter values
+scale_early <- unname(single_model_early$estimate[1])
+shape_early <- unname(single_model_early$estimate[2])
+scale_late <- unname(single_model_late$estimate[1])
+shape_late <- unname(single_model_late$estimate[2])
+
+scale_late_no2020 <- unname(single_model_late_no2020$estimate[1])
+shape_late_no2020 <- unname(single_model_late_no2020$estimate[2])
+
+### Transform to uniform
+#column is year
+ts_uniform_early <- ts_uniform_late <- ts_uniform_late_no2020 <- matrix(NA, nrow = 153, ncol = 20) 
+
+#early
+for(i in 1:length(data_early$FWI)){
+  j <- data_early$days_since[i]
+  yr <- which(unique(data_early$YR) == data_early$YR[i])
+  if(data_early$FWI[i] < mu_early[j]) {
+    ts_uniform_early[j, yr] <- which(ecdf_early[,j] == data_early$FWI[i]) /
+      (length(na.omit(ecdf_early[,j]))+1)
+  } else {
+    ts_uniform_early[j, yr] <- gpd_quant + (1-gpd_quant) * pgpd(data_early$FWI[i], 
+                                                    loc = mu_early[j],
+                                                    scale = single_model_early$estimate[1], 
+                                                    shape = single_model_early$estimate[2])
+  }
+}
+
+#late
+for(i in 1:length(data_late$FWI)){
+  j <- data_late$days_since[i]
+  yr <- which(unique(data_late$YR) == data_late$YR[i])
+  if(data_late$FWI[i] < mu_late[j]) {
+    ts_uniform_late[j, yr] <- which(ecdf_late[,j] == data_late$FWI[i]) /
+      (length(na.omit(ecdf_late[,j]))+1)
+  } else {
+    ts_uniform_late[j, yr] <- gpd_quant + (1-gpd_quant) * pgpd(data_late$FWI[i], 
+                                                   loc = mu_late[j],
+                                                   scale = single_model_late$estimate[1], 
+                                                   shape = single_model_late$estimate[2])
+  }
+}
+
+#late_no2020
+for(i in 1:length(data_late_no2020$FWI)){
+  j <- data_late_no2020$days_since[i]
+  yr <- which(unique(data_late_no2020$YR) == data_late_no2020$YR[i])
+  if(data_late_no2020$FWI[i] < mu_late_no2020[j]) {
+    ts_uniform_late_no2020[j, yr] <- which(ecdf_late_no2020[,j] == data_late_no2020$FWI[i]) /
+      (length(na.omit(ecdf_late_no2020[,j]))+1)
+  } else {
+    ts_uniform_late_no2020[j, yr] <- gpd_quant + (1-gpd_quant) * pgpd(data_late_no2020$FWI[i], 
+                                                   loc = mu_late_no2020[j],
+                                                   scale = single_model_late_no2020$estimate[1], 
+                                                   shape = single_model_late_no2020$estimate[2])
+  }
+}
+
+
+############
+#Frechet with alpha=2
+###########
+RV_ts_early <- 1/sqrt(log(1/ts_uniform_early))
+RV_ts_late <- 1/sqrt(log(1/ts_uniform_late))
+RV_ts_late_no2020 <- 1/sqrt(log(1/ts_uniform_late_no2020))
+
+
+# Subtract mean (Bias correction)
+me <- mean(na.omit(c(RV_ts_early)))
+ml <- mean(na.omit(c(RV_ts_late)))
+ml_no2020 <- mean(na.omit(c(RV_ts_late_no2020)))
+
+RV_ts_early <- ifelse(RV_ts_early - me > 0,
+                      RV_ts_early - me, 0)
+RV_ts_late <- ifelse(RV_ts_late - ml > 0,
+                     RV_ts_late - ml, 0)
+RV_ts_late_no2020 <- ifelse(RV_ts_late_no2020 - ml_no2020 > 0,
+                     RV_ts_late_no2020 - ml_no2020, 0)
+
+``` 
+
+  
+The first step in much of time series analysis is a determination on whether a given time series is stationary. To explore tail stationarity we first look for evidence of seasonality by comparing high quantiles of the marginal distribution for each day. Our data has 63 observations of each calendar day which implies that if we restrict attention to each individual day our high quantile estimates will be very noise (figure 1). It is reasonable to borrow strength from surrounding days to decrease the variance in quantile estimation. This borrowing of strength will increase the bias in the estimation of the marginal. We readily accept the increased bias because we think that the bias introduced will be minimal; it is unlikely that the marginal distribution of weather on July 15 is meaningfully different from that of July 16 or July 22. 
+
+```{r "seasonality plot 1", echo = F, fig.cap = "97.5th quantile of FWI by day (1959-2021). Noisy estimate (black) from only using that day's observations. Smoothed estimate (blue) from including observations from seven days before and after the date being estimated (ex. to estimate July 15th we include all observations between July 8th and July 22nd).", fig.height= 3}
+# first we make a plot of the daily 0.95 quantile when considering all years
+quantiles_95_per_day <- rep(NA, 153)
+seasonality_quantile <- 0.975
+num_days <- c(30, 31, 31, 30, 31)
+num_days_in_prev_months <- 0
+for (i in 6:10){
+  num_days_this_month <- num_days[(i-5)]
+  for (j in 1:num_days_this_month){
+    quantiles_95_per_day[j + num_days_in_prev_months] <- quantile(filter(data.temp, MON == i,
+                                                                         DAY == j)$FWI,
+                                                                  seasonality_quantile, type = 1)
+  }
+  num_days_in_prev_months <- num_days_in_prev_months + num_days_this_month
+}
+
+k <- 15
+q <- c(0.25, 0.5, 0.7, 0.85, 0.975)
+
+data.temp$days_since <- rep(seq(0,152,1), length(unique(data.temp$YR)))
+quant <- matrix(NA, nrow = (154-k), ncol=5)
+means <- rep(NA, 154-k)
+
+for (i in 0:(153-k-1)) {
+  temp <- filter(data.temp, days_since %in% c(i:(i+k)))$FWI
+  quant[(i+1),] <- quantile(temp, q, type = 1, na.rm = T)
+  means[(i+1)] <- mean(temp)
+}
+
+plot(quantiles_95_per_day, type = "l",
+     xlab = "Days Since June 1", ylab = "FWI")
+lines(8:146, quant[,5], col = "blue")
+```
+  
+Cursory quantile plots suggest the presence of bi-modal seasonality in the high quantiles of daily FWI (figure 1). We note that this bi-modal seasonality remains when we split the data used for estimation into what we consider past climate (1959 - 1978) and present climate (2002 - 2021) (figures 2 and 3). We note that there appears to be a shift in the high quantiles between the two time periods and thus expect a season like 2020 to be more likely under current climate.   
+
+```{r "seasonality plot 2", echo = F, fig.cap = "Past (top) and present (bottom) estimate of quantiles of FWI by day. Quantiles estimated by including observations from seven days before and after the date being estimated (ex. to estimate July 15th we include all observations between July 8th and July 22nd).", fig.height= 7}
+# Split the plot into the early and late seasons
+quants_early <- quants_late <- quants_late_no2020 <- matrix(NA, nrow = 153, ncol = 6)
+
+
+for(i in 1:153){
+  quants_early[i,1:5] <- quantile(na.omit(ecdf_early[,i]), probs = q)
+  quants_early[i,6] <- mean(na.omit(ecdf_early[,i]))
+  
+  quants_late[i, 1:5] <- quantile(na.omit(ecdf_late[,i]), probs = q)
+  quants_late[i, 6] <- mean(na.omit(ecdf_late[,i]))
+  
+  quants_late_no2020[i, 1:5] <- quantile(na.omit(ecdf_late_no2020[,i]), probs = q)
+  quants_late_no2020[i, 6] <- mean(na.omit(ecdf_late_no2020[,i]))
+}
+
+par(mfrow= c(2,1), mai = c(0.5, 0.5, 0.25, 0.25))
+plot(quants_early[,5], type = "l", ylim = c(0,50), xlim = c(0,166),
+     xlab = "Days Since June 1", ylab = "FWI")
+lines(quants_early[,4])
+lines(quants_early[,3])
+lines(quants_early[,2])
+lines(quants_early[,1])
+lines(quants_early[,6], col = "blue")
+abline(v=c(31, 62, 93, 123), lty = "dotted")
+legend(x=146, y=24, bty = "n", c("0.975",
+                                 "0.85",
+                                 "0.7", "mean",
+                                 "0.5", "0.25"),
+       text.col = c(rep("black", 3), "blue" , rep("black", 2)))
+legend("topright", bty = 'n', legend = c("Past (1959-1978)"))
+
+plot(quants_late[,5], type = "l", ylim = c(0,50), xlim = c(0,166),
+     xlab = "Days Since June 1", ylab = "FWI")
+lines(quants_late[,4])
+lines(quants_late[,3])
+lines(quants_late[,2])
+lines(quants_late[,1])
+lines(quants_late[,6], col = "blue")
+abline(v=c(31, 62, 93, 123), lty = "dotted")
+legend(x=146, y=24, bty = "n", c("0.975",
+                                 "0.85",
+                                 "0.7", "mean",
+                                 "0.5", "0.25"),
+       text.col = c(rep("black", 3), "blue" , rep("black", 2)))
+legend("topright", bty = 'n', legend = c("Present (2002-2021)"))
+par(mfrow = c(1,1), mar = c(5, 4, 4, 2) + 0.1)
+
+```  
+
+```{r "seasonality plot 3", echo = F, fig.cap = "Comparison of 97.5th daily quantile estimate between past climate (1959 - 1978) and present climae(2002 - 2021).", fig.height= 3.5}
+# Compare early to late 0.95 quantile
+dates <- format(as.Date(as.Date('2020-06-01'):as.Date('2020-10-31'), 
+                        origin = '2020-01-01'), format = '%m-%d')
+
+plot(quants_late[,5], type = "l", 
+     ylim = c(min(quants_early[,5]) -5, max(quants_late[,5]) +5), xlim = c(0,153),
+     xlab = "", ylab = "FWI", xaxt="n")
+axis(1, at = c(seq(1, 153, 14),153), labels = dates[c(seq(1, 153, 14),153)], las=2)
+lines(quants_early[,5], lty = 2)
+lines(quants_late_no2020[,5], col = "red")
+legend(x = 117, y = 45, c("Present", "", "", "", "", "Past"), bty = "n")
+
+
+
+png(filename="./paper/plots_for_paper/ERA5_quantile_plot.png",
+    res=2000, height = 1.2, width = 4, units="in", pointsize = 5.5) 
+
+par(mai = c(0.25, 0.4, 0.1, 0.15))
+plot(quants_late[,5], type = "l", 
+     ylim = c(min(quants_early[,5]) -5, max(quants_late[,5]) +5), xlim = c(0,153),
+     xlab = "", ylab = "FWI", xaxt="n")
+axis(1, at = c(seq(1, 153, 14),153), labels = dates[c(seq(1, 153, 14),153)], las=1)
+lines(quants_early[,5], lty = 2)
+legend(x = 117, y = 45, c("Present", "", "", "", "", "Past"), bty = "n")
+
+dev.off()
+
+```
+
+
+
+
+# Estimation of the Marginal distribution 
+
+We estimate the marginal distribution of daily fire weather through a day-dependent moving window empirical cumulative distribution function (ECDF) for the bulk of the distribution and a day-dependent generalized pareto distribution for the upper tail. We estimate the marginal distribution separately for present and past climate. To estimate the marginal distribution of present climate on day $t$ we use all observations from $t-k$ through $t+k$ in years 2002 through 2021 to compute the day dependent ECDF. Wu use the day-dependent ECDF to compute the 0.975 quantile $\hat{\mu}_t^{present}$ which is our threshold for the GPD. Points above the threshold are modeled with a GPD with scale and shape estimates $\hat{\psi}^{present}$ and $\hat{\xi}^{present}$ respectively:  
+
+$$ \hat{F}_t^{present} (x) = \begin{cases} 
+      \{20(2k+1) + 1\}^{-1} \sum_{i=1}^{20} \sum_{j = t-k}^{t+k} \mathbb{I}(x_{ij} > x) & x\leq \hat{\mu}_{t}^{present} \\
+      1 - 0.025\left\{1+\hat{\xi}^{present}(x-\hat{\mu}_{t}^{present}) / \hat{\psi}^{present}\right\}^{-1/ \hat{\xi}^{present}} & x > \hat{\mu}_{t} 
+   \end{cases}$$
+
+The marginal for past climate was estimated in the same way. We considered allowing the scale and shape parameters of the GPD to vary by time as well but likelihood ratio tests and plots of the estimated parameters suggested that this was unwarranted.  
+
+```{r "gpd parameter table", echo = F, fig.cap= "GPD parameter estimates"}
+parameter <- c("scale", "shape")
+past_paras <- c(scale_early, shape_early)
+present_paras <- c(scale_late, shape_late)
+
+gpd_paras <- data.frame("." = parameter, "past" = round(past_paras, 4), "present" = round(present_paras, 4))
+
+kable(gpd_paras)
+```
+  
+# Dependence Estimation  
+  
+Once the marginal distribution of the two climate periods has been estimated we transform the data to be marginally Frechet distributed with scale one and shape parameter $\alpha = 2$. This means that the data is now non-negative regularly varying with tail index $2$. Furthermore we can reasonably assume that the time series are weakly tail stationary and thus we can estimate the tail dependence with an ajusted version of the TPDF estimator of Cooley and Thibaud. Unlike previous studies (Mhatre and Cooley, in progress) we do not have a single time series but 20 observed time series of each climate period. This separation into 20 time series is necessary because we do not expect the tail dependence between July 15th, 2002 and July 16th, 2002 to be the same as the tail dependence between October 31st, 2002 and June 1st, 2003 for obvious reasons.   
+  
+Due to this complication we adjust Cooley and Thibaud's estimator by computing the radial components separately by year and then combine the radial components into one vector to compute the TPDF. Let $(x_{y,t}, x_{y,t+h})$ be the year $y$ lag-$h$ pairs of observations from a weakly tail stationary time series $\{X_{y.t}\}$. Consider $r_{y,t} = \lVert (x_{y,t}, x_{y,t+h})\lVert _2$, the $l-2$ distance from the origin to the point $(x_{y,t}, x_{y,t+h})$ (the radial components). Finally consider $(w_{y,t}, w_{y,t+h}) = (x_{y,t}, x_{y,t+h})/r_{y,t}$, the unit-radius points. Our TPDF estimator is defined as 
+
+$$ \hat{\sigma}(h) = \frac{2}{\sum_{y=1}^{20}\sum_{t = 1}^{n-h}\mathbb{I}(r_{y,t} > r_0)} \sum_{y=1}^{20}\sum_{t = 1}^{n-h}  w_{y,t} w_{y,t+h} \mathbb{I}(r_{y,t} > r_0) $$  
+  
+Where $r_0$ is some high quantile of all radial components $r_{y,t}$, $y = 1, 2, ..., 20$ and $t = 1, 2, ... , n-h$. 
+
+ 
+```{r "tpdf estimation", echo = F, cache = T}
+#########
+#Estimate TPDF
+#########
+
+# compute lags
+lags_early <- lags_late <- matrix(NA, nrow = (153*20), ncol = maxlag+1)
+
+for(i in 1:20){
+  indices <- c(((i-1)*153+1):(i*153))
+  lags_early[indices, (maxlag+1)] <- RV_ts_early[,i] #save transformed data into a vector
+  lags_late[indices, (maxlag+1)] <- RV_ts_late[,i]
+  for(j in 1:maxlag){
+    lags_early[indices, j] <- lag(RV_ts_early[,i], j) 
+    #append each years lagged vectors onto previous years
+    lags_late[indices, j] <- lag(RV_ts_late[,i], j)
+  }
+}
+
+# compute radial components
+rt_early <- rt_late <- matrix(NA, nrow <- (153*20), ncol = maxlag)
+
+for(j in 1:maxlag){
+  rt_early[,j] <- sqrt(lags_early[,j]^2 + lags_early[,(maxlag+1)]^2)
+  
+  rt_late[,j] <- sqrt(lags_late[,j]^2 + lags_late[,(maxlag+1)]^2)
+}
+
+# compute "high threshold of radial component" (0.95 quantile of radial components)
+r0_early <- r0_late <- rep(NA, maxlag)
+
+for (i in 1:maxlag){
+  len <- length(na.omit(rt_early[,i]))
+  ind <- floor(r0_quant*len)
+  r0_early[i] <- sort(na.omit(rt_early[,i]))[ind]
+  
+  len <- length(na.omit(rt_late[,i]))
+  ind <- floor(r0_quant*len)
+  r0_late[i] <- sort(na.omit(rt_late[,i]))[ind]
+}
+
+
+# Compute tpdf
+tpdf_early <- tpdf_late <- rep(NA, maxlag)
+
+for (i in 1:maxlag) {
+  wi_temp <- lags_early[,i]*lags_early[,(maxlag+1)]/(rt_early[,i]^2) #angular components
+  rt_temp <- ifelse(is.na(rt_early[,i]), 0, rt_early[,i]) #set NA's to zer
+  k <- sum(rt_temp > r0_early[i]) # how many above radial threshold
+  tpdf_early[i] <- 2/k * sum(wi_temp[which(rt_temp>r0_early[i])])
+  
+  wi_temp <- lags_late[,i]*lags_late[,(maxlag+1)]/(rt_late[,i]^2) #angular components
+  rt_temp <- ifelse(is.na(rt_late[,i]), 0, rt_late[,i]) #set NA's to zer
+  k <- sum(rt_temp > r0_late[i]) # how many above radial threshold
+  tpdf_late[i] <- 2/k * sum(wi_temp[which(rt_temp>r0_late[i])])
+}
+
+#add lag 0 to tpdf
+tpdf_early <- c(1, tpdf_early)
+tpdf_late <- c(1, tpdf_late)  
+```  
+
+```{r "Empirical TPDF estimates", echo = F, fig.cap = "Estimated TPDF of past and present climate up to 50 lags.", fig.height=4}
+#plot
+par(mfrow = c(2,1), mai = c(0.5, 0.5, 0.25, 0.25))
+plot(0:maxlag, tpdf_early, type = "h", ylim = c(0,1))
+legend("topright", legend = c("Past"), bty = "n")
+plot(0:maxlag, tpdf_late, type = "h", ylim = c(0,1))
+legend("topright", legend = c("Present"), bty = "n")
+par(mfrow = c(1,1), mar = c(5, 4, 4, 2) + 0.1)
+```  
+  
+# Model Estimation   
+
+Mhatre and Cooley (in progress) developed transformed linear extreme value analogues to classical $MA(q)$, $AR(p)$, and $ARMA(p,q)$ time series models. In their development of the $ARMA(p,q)$ models they show that the unique stationary solution is an $MA(\infty)$ and thus the TPDF is well approximated by the TPDF of a large order $MA(q)$. Mhartre and Cooley (in progress) developed an analogue to the innovations algorithm which, like the classical innovations algorithm, can be used to estimate parameters of an $MA(\infty)$ with the same TPDF as the weakly tail stationary, regularly varying time series with tail index $\alpha = 2$. This extremes innovation algorithm is deterministic, computationally cheap, and very flexible which is why we use it to estimate a set of thetas which have the same TPDF as the empirical TPDF.  
+  
+```{r "innovations parameter estimation", echo = F}
+####
+# Estimate theta's using innovations algorithm
+####
+nu_early <- nu_late <- rep(NA, maxlag+1)
+theta_hat_early <- theta_hat_late <- matrix(0, nrow = maxlag, ncol = maxlag)
+
+   # note that nu[5] is the fourth iteration because r does not have index 0
+nu_early[1] <- tpdf_early[1] 
+nu_late[1] <- tpdf_late[1]
+
+for(n in 1:maxlag){
+  for(k in 0:(n-1)){
+    temp_sum_early <- 0
+    temp_sum_late <- 0 
+    if(k>0){
+      for(j in 0:(k-1)){
+        temp_sum_early <- temp_sum_early + theta_hat_early[k, k-j]*
+          theta_hat_early[n, n-j]*nu_early[j+1]
+        
+        temp_sum_late <- temp_sum_late + theta_hat_late[k, k-j]*
+          theta_hat_late[n, n-j]*nu_late[j+1]
+      }
+    }
+    theta_hat_early[n, n-k] <- nu_early[k+1]^(-1) * 
+      (tpdf_early[n-k+1] - temp_sum_early)
+    
+    theta_hat_late[n, n-k] <- nu_late[k+1]^(-1) * 
+      (tpdf_late[n-k+1] - temp_sum_late)
+  }
+  
+  nu_early[n+1] <- nu_early[1]
+  nu_late[n+1] <- nu_late[1]
+  for(l in 0:(n-1)){
+    nu_early[n+1] <- nu_early[n+1] - theta_hat_early[n, (n-l)]^2*nu_early[l+1] 
+    
+    nu_late[n+1] <- nu_late[n+1] - theta_hat_late[n, (n-l)]^2*nu_late[l+1] 
+  }
+}
+```
+  
+```{r "tpdf plot 1", echo = F, fig.cap = "Estimated TPDF compared to theoretical TPDF computed from the analogue to the innovations algorithm estimated MA(50) parameters.", fig.height= 3.5}
+# plot estimated tpdf and the theoretical tpdf from the last iteration of the innovations algorithm
+par(mfrow = c(2,1), mai = c(0.5, 0.5, 0.25, 0.25))
+plot(0:30, tpdf_early[1:31], type = "h", ylim = c(0,1))
+lines(0:30 + 0.2, MAq_tpdf(theta_hat_early[maxlag,])[1:31], type = "h", col = "blue")
+legend("topright", legend = c("Empirical Estimate", paste("Theoretical:", maxlag, "innovation theta's")), bty = "n",
+       col = c("black", "blue"), text.col = c("black", "blue"))
+plot(0:30, tpdf_late[1:31], type = "h", ylim = c(0,1))
+lines(0:30 + 0.2, MAq_tpdf(theta_hat_late[maxlag,])[1:31], type = "h", col = "blue")
+legend("topright", legend = c("Empirical Estimate", paste("Theoretical:", maxlag, "innovation theta's")), bty = "n",
+       col = c("black", "blue"), text.col = c("black", "blue"))
+par(mfrow = c(1,1), mar = c(5, 4, 4, 2) + 0.1)
+```  
+  
+  
+```{r "tpdf plot 2", echo = F, fig.cap = "Estimated TPDF compared to theoretical TPDF computed from the analogue to the innovations algorithm estimated MA(10) parameters. Note that for both past and present climate we determined that an MA(10) was a useful model.", fig.height=3.5}
+# plot estimated tpdf and the theoretical tpdf from the 10th iteration of the innovations algorithm
+par(mfrow = c(2,1), mai = c(0.5, 0.5, 0.25, 0.25))
+plot(0:maxlag, tpdf_early[1:(maxlag+1)], type = "h", ylim = c(0,1), lwd = 2)
+lines(0:chosen_order + 0.2, MAq_tpdf(theta_hat_early[chosen_order,])[1:(chosen_order+1)], 
+      type = "h", col = "grey50", lwd = 2)
+legend("topright", legend = c("empirical", "fitted"), bty = "n",
+       col = c("black", "grey50"), text.col = c("black", "grey50"), 
+       title = "Past", lty = 1, lwd = 2)
+abline(h = 0.1, lty = 2, col = "grey")
+plot(0:maxlag, tpdf_late[1:(maxlag+1)], type = "h", ylim = c(0,1), lwd = 2)
+lines(0:chosen_order + 0.2, MAq_tpdf(theta_hat_late[chosen_order,])[1:(chosen_order + 1)], 
+      type = "h", col = "grey50", lwd = 2)
+legend("topright", legend = c("empirical", "fitted"), bty = "n",
+       col = c("black", "grey50"), text.col = c("black", "grey50"), 
+       title = "Present", lty = 1, lwd = 2)
+abline(h = 0.1, lty = 2, col = "grey")
+par(mfrow = c(1,1), mar = c(5, 4, 4, 2) + 0.1)
+
+
+
+png(filename="./paper/plots_for_paper/ERA5_CO_TPDF_hq2.png",
+    res=2000, height = 2, width = 6, units="in", pointsize = 6) 
+
+par(mfrow = c(2,1), mai = c(0.2, 0.2, 0.1, 0.1))
+plot(0:maxlag, tpdf_early[1:(maxlag+1)], type = "h", ylim = c(0,1), lwd = 2)
+lines(0:chosen_order + 0.2, MAq_tpdf(theta_hat_early[chosen_order,])[1:(chosen_order+1)], 
+      type = "h", col = "grey50", lwd = 2)
+legend("topright", legend = c("empirical", "fitted"), bty = "n",
+       col = c("black", "grey50"), text.col = c("black", "grey50"), 
+       title = "Past", lty = 1, lwd = 2)
+abline(h = 0.1, lty = 2, col = "grey")
+plot(0:maxlag, tpdf_late[1:(maxlag+1)], type = "h", ylim = c(0,1), lwd = 2)
+lines(0:chosen_order + 0.2, MAq_tpdf(theta_hat_late[chosen_order,])[1:(chosen_order + 1)], 
+      type = "h", col = "grey50", lwd = 2)
+legend("topright", legend = c("empirical", "fitted"), bty = "n",
+       col = c("black", "grey50"), text.col = c("black", "grey50"), 
+       title = "Present", lty = 1, lwd = 2)
+abline(h = 0.1, lty = 2, col = "grey")
+par(mfrow = c(1,1), mar = c(5, 4, 4, 2) + 0.1)
+
+dev.off()
+```  
+  
+```{r "plot 2020 ts"}
+# plot 2020 time series 
+png(filename="./paper/plots_for_paper/ERA5_CO_2020_FWI2_with_quantile_and_points.png",
+    res=2000, height = 0.8, width = 4, units="in", pointsize = 5) 
+
+par(mai = c(0.2, 0.35, 0.05, 0.05))
+plot(data_late$FWI[which(data_late$YR == 2020)], type = "l", xlab = "", ylab = "FWI", 
+     xaxt = "n")
+axis(1, at = c(seq(1, 153, 14),153), labels = dates[c(seq(1, 153, 14),153)], las = 1)
+abline(h = quantile(data_late$FWI, probs = 0.975), lwd = 0.5, col = "grey")
+points(which(data_late$FWI[which(data_late$YR == 2020)] > quantile(data_late$FWI, probs = 0.975)), data_late$FWI[which(data_late$YR == 2020)][which(data_late$FWI[which(data_late$YR == 2020)] > quantile(data_late$FWI, probs = 0.975))], cex = 0.75, col = "grey40")
+dev.off()
+
+```
+```{r "number above quantile per year"}
+above_quantile_matrix <- matrix(NA, nrow = 40, ncol = 3)
+quants_late_for_matrix <- quantile(probs = c(0.95, 0.975, 0.99), data_late$FWI)
+for(i in 1:20){
+  for(j in 1:3){
+    above_quantile_matrix[i,j] <- length(which(data_early$FWI[which(data_early$YR == 
+                                              (1958+i))] > quants_late_for_matrix[j]))
+    above_quantile_matrix[(20+i),j] <- length(which(data_late$FWI[which(data_late$YR == 
+                                              (2001+i))] > quants_late_for_matrix[j]))
+  }
+  
+}
+
+plot(1:40, above_quantile_matrix[,1], pch = c(rep(20, 20), rep(19, 18), 8, 19), 
+     col = c(rep("grey", 20), rep(1, 18), 2, 1))
+plot(1:40, above_quantile_matrix[,2], pch = c(rep(20, 20), rep(19, 18), 8, 19), 
+     col = c(rep("grey", 20), rep(1, 18), 2, 1))
+plot(1:40, above_quantile_matrix[,3], pch = c(rep(20, 20), rep(19, 18), 8, 19), 
+     col = c(rep("grey", 20), rep(1, 18), 2, 1))
+
+```
+
+
+
+
+
+```{r, echo = F}
+# generate iid Frechet random variables for MA(q) 
+z <- rfrechet(seq_length, loc = 0, scale = 1, shape = 2)
+max_index <- which(z == max(z))
+
+# Matrix to store all reasonable order MA(q)'s from innovations estimated theta's
+MA_early_mat <- MA_late_mat <- matrix(NA, nrow = seq_length, ncol = max_theta)
+day_index <- rep(1:153, 327) # for back-transformation seasonality
+```
+  
+```{r "bias in empirical tpdf", cache = T, echo = F, fig.cap = "Bias in empirical TPDF. Note the difference between the Theoretical TPDF (black) and emprical TPDF (blue) calculated from simulated $MA(10)$ time series.", fig.height=3}
+q_sim <- 10
+set.seed(2873)
+thetas_sim <- runif(q_sim)
+while (min(abs(polyroot(c(1,thetas_sim)))) < 1){
+  thetas_sim <- runif(q_sim)
+}
+
+ma_sim<- rep(NA, seq_length)
+ma_sim[1] <- z[1]
+
+for(i in 2:seq_length){
+  temp <- z[i]
+  k <- min((i-1), length(thetas_sim))
+  for(j in 1:k){
+    temp <- tadd(temp, tmult(thetas_sim[j], z[i-j]))
+  }
+  ma_sim[i] <- temp
+}
+
+ma_sim <- ifelse(ma_sim - mean(ma_sim)>0, ma_sim - mean(ma_sim), 0)
+
+tpdf_sim <- TPDF(ts(ma_sim))
+tpdf_the <- MAq_tpdf(thetas_sim)
+
+plot(0:20, c(tpdf_the, rep(NA, 10)), type = "h", xlab = "lag", ylab = "TPDF")
+lines(0:20 + 0.2, tpdf_sim[1:21], type = "h", col = "blue")
+legend("topright", bty = "n", text.col = c("black", "blue"), 
+       legend = c("Theoretical", "Empirical"))
+
+```  
+ 
+# Choosing Order of $MA(q)$  
+
+We choose which order, $q$, to use by looking at the TPDF and by comparing summary statistics from our data to the same summary statistics given by fitted models of reasonable orders. In particular, we consider the mean run length above high quantiles ($0.95, 0.975, and 0.99$) as well as high quantiles of the sum of 5 consecutive terms. If we have estimated the marginal correctly and have modeled the tail dependence usefully then we should be able to match these two upper tail-dependent statistics.  
+  
+
+
+```{r "summary stats functions", cache = T, echo = F}
+mean_run <- function(data, quant){
+  # get quantile
+  quant_temp <- quantile(probs = quant, data)
+  
+  # get indices above quantile
+  runs_index <- which(data > unname(quant_temp))
+  
+  # convert vector of indices to matrix of runs
+  runs_seq <- R.utils::seqToIntervals(runs_index)
+  
+  # Compute run lengths
+  runs_length <- runs_seq[,2] - runs_seq[,1] + 1
+  
+  # return mean of the run lengths
+  return(mean(runs_length))
+}
+
+
+sum_high_quant <- function(data, quant, m = 5){
+  sum_of_m<- rep(NA, length(data)-m)
+
+  # Compute sum of m consecutive terms
+  for(i in 1:(length(data)-m)){
+    sum_of_m[i] <- sum(data[i:(i+m-1)])
+  }
+  
+  # return quantile of the sums
+  return(quantile(sum_of_m, probs = quant))
+}
+```
+
+
+```{r "summary stats on data", cache=T, echo = F}
+summary_quants <- c(0.95, 0.975, 0.99)
+mean_run_early <- mean_run_late <- sum_early <- sum_late <- 
+  rep(NA, length(summary_quants))
+
+mean_run_early[1] <- mean_run(data = data_early$FWI, quant = summary_quants[1])
+mean_run_early[2] <- mean_run(data = data_early$FWI, quant = summary_quants[2])
+mean_run_early[3] <- mean_run(data = data_early$FWI, quant = summary_quants[3])
+
+mean_run_late[1] <- mean_run(data = data_late$FWI, quant = summary_quants[1])
+mean_run_late[2] <- mean_run(data = data_late$FWI, quant = summary_quants[2])
+mean_run_late[3] <- mean_run(data = data_late$FWI, quant = summary_quants[3])
+
+sum_early[1] <- sum_high_quant(data = data_early$FWI, quant = summary_quants[1])
+sum_early[2] <- sum_high_quant(data = data_early$FWI, quant = summary_quants[2])
+sum_early[3] <- sum_high_quant(data = data_early$FWI, quant = summary_quants[3])
+
+sum_late[1] <- sum_high_quant(data = data_late$FWI, quant = summary_quants[1])
+sum_late[2] <- sum_high_quant(data = data_late$FWI, quant = summary_quants[2])
+sum_late[3] <- sum_high_quant(data = data_late$FWI, quant = summary_quants[3])
+
+summary_stats <- data.frame(quantile = summary_quants, "mean past" = mean_run_early, 
+                            "mean present" = mean_run_late, 
+                            "sum past" = sum_early, "sum present" = sum_late)
+
+kable(summary_stats)
+```
+  
+It is known that the empirical TPDF is a biased estimate of the true TPDF (figure 7). This introduces a non-trivial challenge when comparing our empirical TPDF to the TPDF calculated from the parameters estimated by the innovations algorithm. The innovations algorithm can fit any valid TPDF to any order with arbitrarily small error which means that we end up modelling the biased tail dependence thus we expect some difference in the aforementioned summary statistics. 
+  
+With this understanding we notice that the empirical TPDF plots seem to level out between lag 10 and lag 20 so we expect that a reasonable model order is somewhere in that range. To be conservative we compute summary statistics for simulated time series from $MA(q)$ models of orders $q = 1, 2, ..., 50$ and compare them to the values computed from our data (figures 8 & 9). We note that the different quantiles suggest different order models and that the $0.99$ quantile suggests use of lower order models. For this reason we consider an $MA(10)$ for both present and past climate. 
+  
+  
+```{r "generate MA(q)s", cache=TRUE, echo=FALSE}
+a = 1
+set.seed(83745)
+## generate ts for each "reasonable" order of MA(q) and convert to original marginal
+for(j in 1:max_theta){
+
+  # Past climate MA fitting 
+  theta_temp_early <- theta_hat_early[j,1:j]
+  temp_ts_early <- rep(0, seq_length)
+  temp_ts_early[1] <- z[1]
+  
+  for(i in 2:seq_length){
+    temp_early <- z[i]
+    k <- min((i-1), length(theta_temp_early))
+    for(l in 1:k){
+      temp_early <- tadd(temp_early, tmult(theta_temp_early[l], z[i-l]))
+    }
+    temp_ts_early[i] <- temp_early
+  }
+  # uniform marginal
+  temp_ts_early <- ecdf(temp_ts_early)(temp_ts_early) - 
+    0.5*min(ecdf(temp_ts_early)(temp_ts_early))
+  
+  #FWI marginal
+  for(i in 1:seq_length){
+    if(temp_ts_early[i] < gpd_quant){
+      temp_ts_early[i] <- quantile(na.omit(ecdf_early[,day_index[i]]), temp_ts_early[i])
+    } else {
+      temp_ts_early[i] <- qgpd(temp_ts_early[i], mu_early[day_index[i]],
+                      scale = scale_early, shape = shape_early)
+    }
+  }
+  
+  MA_early_mat[,j] <- temp_ts_early
+
+# Current climate MA fitting 
+  theta_temp_late <- theta_hat_late[j,1:j]
+  temp_ts_late <- rep(0, seq_length)
+  temp_ts_late[1] <- z[1]
+  
+  for(i in 2:seq_length){
+    temp_late <- z[i]
+    k <- min((i-1), length(theta_temp_late))
+    for(l in 1:k){
+      temp_late <- tadd(temp_late, tmult(theta_temp_late[l], z[i-l]))
+    }
+    temp_ts_late[i] <- temp_late
+  }
+  
+  # uniform marginal
+  temp_ts_late <- ecdf(temp_ts_late)(temp_ts_late) - 
+    0.5*min(ecdf(temp_ts_late)(temp_ts_late))
+  
+  #FWI marginal
+  for(i in 1:seq_length){
+    if(temp_ts_late[i] < gpd_quant){
+      temp_ts_late[i] <- quantile(na.omit(ecdf_late[,day_index[i]]), temp_ts_late[i])
+    } else {
+      temp_ts_late[i] <- qgpd(temp_ts_late[i], mu_late[day_index[i]],
+                        scale = scale_late, shape = shape_late)
+    }
+  }
+  
+  MA_late_mat[,j] <- temp_ts_late
+}
+
+
+
+```
+
+  
+  
+```{r "summary stats on simulations1", cache = T, echo = F, fig.cap = "Past climate summary statistics from simulated moving average time series. The red dotted line, when present, is the value of the statistic calculated from the observed data.", fig.height= 5}
+
+mean_run_early_sim <- mean_run_late_sim <- sum_early_sim <- sum_late_sim <- 
+  matrix(NA, ncol = length(summary_quants), nrow = max_theta)
+
+for(i in 1:max_theta){
+  mean_run_early_sim[i, 1] <- mean_run(data = MA_early_mat[,i], quant = summary_quants[1])
+  mean_run_early_sim[i, 2] <- mean_run(data = MA_early_mat[,i], quant = summary_quants[2])
+  mean_run_early_sim[i, 3] <- mean_run(data = MA_early_mat[,i], quant = summary_quants[3])
+  
+  mean_run_late_sim[i, 1] <- mean_run(data = MA_late_mat[,i], quant = summary_quants[1])
+  mean_run_late_sim[i, 2] <- mean_run(data = MA_late_mat[,i], quant = summary_quants[2])
+  mean_run_late_sim[i, 3] <- mean_run(data = MA_late_mat[,i], quant = summary_quants[3])
+  
+  sum_early_sim[i, 1] <- sum_high_quant(data = MA_early_mat[,i], quant = summary_quants[1])
+  sum_early_sim[i, 2] <- sum_high_quant(data = MA_early_mat[,i], quant = summary_quants[2])
+  sum_early_sim[i, 3] <- sum_high_quant(data = MA_early_mat[,i], quant = summary_quants[3])
+  
+  sum_late_sim[i, 1] <- sum_high_quant(data = MA_late_mat[,i], quant = summary_quants[1])
+  sum_late_sim[i, 2] <- sum_high_quant(data = MA_late_mat[,i], quant = summary_quants[2])
+  sum_late_sim[i, 3] <- sum_high_quant(data = MA_late_mat[,i], quant = summary_quants[3])
+}
+
+par(mfrow = c(3,2), mai = c(0.5, 0.5, 0.25, 0.25))
+plot(mean_run_early_sim[,1], ylab = "run length 0.95", xlab = "MA order")
+abline(h=mean_run_early[1], lty = 2, col = "red")
+legend("bottomright", bty = "n", 
+       legend = paste("Value from data:", round(mean_run_early[1], 3)))
+
+plot(sum_early_sim[,1], ylab = "sum 0.95", xlab = "MA order")
+abline(h=sum_early[1], lty = 2, col = "red")
+legend("bottomright", bty = "n", 
+       legend = paste("Value from data:", round(sum_early[1], 3)))
+
+plot(mean_run_early_sim[,2], ylab = "run length 0.975", xlab = "MA order")
+abline(h=mean_run_early[2], lty = 2, col = "red")
+legend("bottomright", bty = "n", 
+       legend = paste("Value from data:", round(mean_run_early[2], 3)))
+
+plot(sum_early_sim[,2], ylab = "sum 0.975", xlab = "MA order")
+abline(h=sum_early[2], lty = 2, col = "red")
+legend("bottomright", bty = "n", 
+       legend = paste("Value from data:", round(sum_early[2], 3)))
+
+plot(mean_run_early_sim[,3], ylab = "run length 0.99", xlab = "MA order")
+abline(h=mean_run_early[3], lty = 2, col = "red")
+legend("bottomright", bty = "n", 
+       legend = paste("Value from data:", round(mean_run_early[3], 3)))
+
+plot(sum_early_sim[,3], ylab = "sum 0.99", xlab = "MA order")
+abline(h=sum_early[3], lty = 2, col = "red")
+legend("bottomright", bty = "n", 
+       legend = paste("Value from data:", round(sum_early[3], 3)))
+```  
+  
+  
+```{r "summary stats on simulations2", cache = T, echo = F, fig.cap = "Present climate summary statistics from simulated moving average time series. The red dotted line, when present, is the value of the statistic calculated from the observed data.", fig.height=5} 
+
+par(mfrow = c(3,2), mai = c(0.5, 0.5, 0.25, 0.25))
+
+plot(mean_run_late_sim[,1], ylab = "run length 0.95", xlab = "MA order")
+abline(h=mean_run_late[1], lty = 2, col = "red")
+legend("bottomright", bty = "n", 
+       legend = paste("Value from data:", round(mean_run_late[1], 3)))
+
+plot(sum_late_sim[,1], ylab = "sum 0.95", xlab = "MA order")
+abline(h=sum_late[1], lty = 2, col = "red")
+legend("bottomright", bty = "n", 
+       legend = paste("Value from data:", round(sum_late[1], 3)))
+
+plot(mean_run_late_sim[,2], ylab = "run length 0.975", xlab = "MA order")
+abline(h=mean_run_late[2], lty = 2, col = "red")
+legend("bottomright", bty = "n", 
+       legend = paste("Value from data:", round(mean_run_late[2], 3)))
+
+plot(sum_late_sim[,2], ylab = "sum 0.975", xlab = "MA order")
+abline(h=sum_late[2], lty = 2, col = "red")
+legend("bottomright", bty = "n", 
+       legend = paste("Value from data:", round(sum_late[2], 3)))
+
+plot(mean_run_late_sim[,3], ylab = "run length 0.99", xlab = "MA order")
+abline(h=mean_run_late[3], lty = 2, col = "red")
+legend("bottomright", bty = "n", 
+       legend = paste("Value from data:", round(mean_run_late[3], 3)))
+
+plot(sum_late_sim[,3], ylab = "sum 0.99", xlab = "MA order")
+abline(h=sum_late[3], lty = 2, col = "red")
+legend("bottomright", bty = "n", 
+       legend = paste("Value from data:", round(sum_late[3], 3)))
+par(mfrow = c(1,1), mar = c(5, 4, 4, 2) + 0.1)
+```
+  
+    
+
+# Attribution  
+  
+To answer the the attribution question we compare the empirical probability of observing a season with as many days above a threshold as we observed in 2020. We consider the thresholds that are the 0.95, 0.975, and 0.99 quantile of the present climate data. We compute the probabilities from 10,000 seasons that are simulated from the two climate models. 
+  
+According to our model the probability of observing a season with at least as many days above the 0.95, 0.975, and 0.99 quantiles of observed present climate FWI as were observed in 2020 is at least 24, 20, and 9 times higher under present climate as it was under past climate.   
+
+```{r "generate season function", echo = F}
+generate_season <- function(thetas, z){
+  n <- length(thetas)
+  ma <- rep(NA, 153)
+  
+  for(i in 1:153){
+    ma[i] <- z[i+n]
+    for(j in 1:n){
+      ma[i] <- tadd(ma[i], tmult(thetas[j], z[i+n-j]))
+    }
+  }
+  
+  return(ma)
+}
+```
+
+```{r "sim 10,000 seasons and trans to FWI scale", echo = F, cache = T}
+set.seed(6346)
+a <- 1
+seasons_early <- seasons_late <- rep(NA, 153*10000)
+
+for(i in 1:10000){
+  index_start <- (i-1)*153 + 1
+  z <- rfrechet(153 + chosen_order, loc = 0, scale = 1, shape = 2)
+  seasons_early[index_start:(index_start + 152)] <- generate_season(z = z, 
+                          thetas = theta_hat_early[chosen_order, 1:chosen_order])
+  seasons_late[index_start:(index_start + 152)] <- generate_season(z=z, 
+                          thetas = theta_hat_late[chosen_order, 1:chosen_order])
+}
+
+# uniform marginal
+seasons_early <- ecdf(seasons_early)(seasons_early) - 
+  0.5*min(ecdf(seasons_early)(seasons_early))
+
+seasons_late <- ecdf(seasons_late)(seasons_late) - 
+  0.5*min(ecdf(seasons_late)(seasons_late))
+
+# FWI marginal
+day_index <- rep(1:153, 10000)
+for(i in 1:length(seasons_early)){
+  if(seasons_early[i] < gpd_quant){
+    seasons_early[i] <- quantile(na.omit(ecdf_early[,day_index[i]]), seasons_early[i])
+  } else {
+    seasons_early[i] <- qgpd(seasons_early[i], mu_early[day_index[i]],
+                      scale = scale_early, shape = shape_early)
+  }
+}
+
+for(i in 1:length(seasons_late)){
+  if(seasons_late[i] < gpd_quant){
+    seasons_late[i] <- quantile(na.omit(ecdf_late[,day_index[i]]), seasons_late[i])
+  } else {
+    seasons_late[i] <- qgpd(seasons_late[i], mu_late[day_index[i]],
+                      scale = scale_late, shape = shape_late)
+  }
+}
+
+# split back into seasons
+early_seasons <- late_seasons <- matrix(NA, nrow = 10000, ncol = 153)
+for(i in 1:10000){
+  index_start <- (i-1)*153 + 1
+  early_seasons[i,] <- seasons_early[index_start:(index_start + 152)]
+  late_seasons[i,] <- seasons_late[index_start:(index_start + 152)]
+}
+```
+  
+```{r, echo = F, cache = T}
+present_tholds <- quantile(data_late$FWI, prob = summary_quants)
+a <- 2
+num_days_2020 <- rep(NA, 3)
+
+for(i in 1:3){
+  temp <- filter(data_late, YR == 2020)$FWI
+  num_days_2020[i] <- length(which(temp > present_tholds[i]))
+}
+
+count_present_seasons <- rep(0, 3)
+count_past_seasons <- rep(0,3)
+
+for(j in 1:3){
+  for(i in 1:10000){
+    if (length(which(early_seasons[i,] > present_tholds[j])) >= num_days_2020[j]){
+      count_past_seasons[j] <- count_past_seasons[j] + 1
+    }
+    if (length(which(late_seasons[i,] > present_tholds[j])) >= num_days_2020[j]){
+      count_present_seasons[j] <- count_present_seasons[j] + 1
+    }
+  }
+}
+
+df_attribution <- data.frame("t'hold" = present_tholds,
+                             "Days in 2020" = num_days_2020,
+                             "Past" = count_past_seasons/10000, 
+                             "Present" = count_present_seasons/10000, 
+                             "Ratio" = count_present_seasons/count_past_seasons)
+
+kable(df_attribution)
+
+```  
+  
+    
+```{r "histogram of num days above quantile per year"}
+num_days_above_quantile_per_year_data_early <- 
+  num_days_above_quantile_per_year_data_late <- 
+  matrix(NA, ncol = 3, nrow = 20)
+
+quantiles_early <- unname(quantile(data_early$FWI, probs = c(0.95, 0.975, 0.99)))
+quantiles_late <- unname(quantile(data_late$FWI, probs = c(0.95, 0.975, 0.99)))
+
+for(i in 1:20){
+  early_year <- 1958 + i
+  late_year <- 2002 + i
+  
+  for(j in 1:3){
+    num_days_above_quantile_per_year_data_early[i,j] <- 
+      sum(data_early$FWI[which(data_early$YR == early_year)] > quantiles_early[j])
+    num_days_above_quantile_per_year_data_late[i,j] <- 
+      sum(data_late$FWI[which(data_late$YR == late_year)] > quantiles_late[j])
+  }
+}
+
+hist(num_days_above_quantile_per_year_data_early[,2])
+hist(num_days_above_quantile_per_year_data_late[,2])
+
+
+num_days_above_quantile_per_year_simulated_early <- 
+  num_days_above_quantile_per_year_simulated_late <- 
+  matrix(NA, ncol = 3, nrow = 10000)
+
+for(i in 1:10000){
+  for(j in 1:3){
+    num_days_above_quantile_per_year_simulated_early[i,j] <- 
+      sum(early_seasons[i,] > quantiles_early[j])
+    num_days_above_quantile_per_year_simulated_late[i,j] <- 
+      sum(late_seasons[i,] > quantiles_late[j])
+  }
+}
+
+colors <- c(rgb(255, 0, 0, max = 255, alpha = 125, names = "red50"),
+            rgb(0, 0, 255, max = 255, alpha = 125, names = "blue50"), 
+            rgb(100, 0, 255, max = 255, alpha = 175, names = "bluered50"))
+
+hist_quantile <- 1 # 1 is 0.95, 2 is 0.975, 3 is 0.99
+hist_breaks   <- seq(0, 100, length.out = 101)
+
+
+hist(num_days_above_quantile_per_year_data_early[,hist_quantile], xlim = c(0, 40),
+     main = paste("Number of days above", summary_quants[hist_quantile], 
+                  "quantile per year (PAST)", sep = " "), 
+     col = colors[1], xlab = "Days per year", freq = F, breaks = hist_breaks)
+hist(num_days_above_quantile_per_year_simulated_early[,hist_quantile], freq = F, 
+     add = T, col = colors[2], breaks = hist_breaks)
+legend("topright", legend = c("observed seasons", "simulated seasons", "overlap"), 
+       bty = "n", text.col = colors, pch = 15, col = colors)
+hist(num_days_above_quantile_per_year_data_late[,hist_quantile], xlim = c(0, 40), 
+     main = paste("Number of days above", summary_quants[hist_quantile], 
+                  "quantile per year (PRESENT)", sep = " "), 
+     col = colors[1], freq = F, xlab = "Days per year", breaks = hist_breaks)
+hist(num_days_above_quantile_per_year_simulated_late[,hist_quantile], freq = F, 
+     add = T, col = colors[2], breaks = hist_breaks)
+legend("topright", legend = c("observed seasons", "simulated seasons", "overlap"), 
+       bty = "n", text.col = colors, pch = 15, col = colors)
+```  
+  
+  
+```{r "ks tests"}
+ks.test(num_days_above_quantile_per_year_data_early[,1], 
+        num_days_above_quantile_per_year_simulated_early[,1])
+ks.test(num_days_above_quantile_per_year_data_early[,2], 
+        num_days_above_quantile_per_year_simulated_early[,2])
+ks.test(num_days_above_quantile_per_year_data_early[,3], 
+        num_days_above_quantile_per_year_simulated_early[,3])
+
+ks.test(num_days_above_quantile_per_year_data_late[,1], 
+        num_days_above_quantile_per_year_simulated_late[,1])
+ks.test(num_days_above_quantile_per_year_data_late[,2], 
+        num_days_above_quantile_per_year_simulated_late[,2])
+ks.test(num_days_above_quantile_per_year_data_late[,3], 
+        num_days_above_quantile_per_year_simulated_late[,3])
+```
+  
+
+
+
+
+
+
+
+```{r , cache = T, echo = F, fig.cap= "One simulated past climate MA(15) season compared to two observed season"}
+a=0
+par(mfrow= c(3,1), mai = c(0.5, 0.5, 0.25, 0.25))
+plot(MA_early_mat[1:153,15], type = "l", ylab = paste("Early MA(", 15, ")"))
+legend("topright", legend = c("Estimated Past"), text.col = "blue", bty = "n")
+plot(data_early$FWI[1:153], type = "l")
+legend("topright", legend = c("Observed Past"), text.col = "blue", bty = "n")
+plot(data_early$FWI[154:306], type = "l")
+legend("topright", legend = c("Observed Past"), text.col = "blue", bty = "n")
+```  
+  
+```{r, echo = F, fig.cap = "One simulated present climate MA(15) season compared to two observed season"}
+par(mfrow= c(3,1), mai = c(0.5, 0.5, 0.25, 0.25))
+plot(MA_late_mat[1:153,15], type = "l", ylab = paste("Late MA(", 15, ")"))
+legend("topright", legend = c("Estimated Present"), text.col = "blue", bty = "n")
+plot(data_late$FWI[1:153], type = "l")
+legend("topright", legend = c("Observed Present"), text.col = "blue", bty = "n")
+plot(data_late$FWI[154:306], type = "l")
+legend("topright", legend = c("Observed Present"), text.col = "blue", bty = "n")
+```  
+  
+```{r, echo = F, fig.cap = "Tail behavior in simulated seasons under past and present climate"}
+par(mfrow= c(2,1), mai = c(0.5, 0.5, 0.25, 0.25))
+plot(MA_early_mat[(max_index - 10):(max_index + 70),15], type = "l")
+legend("topright", legend = c(paste("Early, MA(", 15, ")")), text.col = "blue", bty = "n")
+plot(MA_late_mat[(max_index - 10):(max_index + 70),15], type = "l")
+legend("topright", legend = c(paste("Late, MA(", 15, ")")), text.col = "blue", bty = "n")
+par(mfrow = c(1,1), mar = c(5, 4, 4, 2) + 0.1)
+
+
+```
